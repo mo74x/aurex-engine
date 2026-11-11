@@ -1,0 +1,155 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+}
+
+enum FxMode {
+  PEGGED          // KSA (3.75), UAE (3.6725), OMR (0.3845)
+  LIVE_FOREX      // Official bank API rate
+  SAGHA_OVERRIDE  // Egypt manual/calibrated local gold dollar rate
+}
+
+enum AccountType {
+  ASSET      // Gateway clearing, physical vault inventory
+  LIABILITY  // Customer escrow balances, VAT payable
+  REVENUE    // Bullion sales, making fees (Masna'eya)
+  EXPENSE    // Absorbed dealer slippage (<= 0.35%)
+}
+
+enum EntryDirection {
+  DEBIT
+  CREDIT
+}
+
+enum IngotStatus {
+  AVAILABLE
+  ALLOCATED
+  MASTER_POOL_BACKING // Physical 100g/1000g 24K bars locked to back fractional XAU_G
+  SHIPPED
+  BUYBACK_RETURNED
+}
+
+enum OrderLifecycleStatus {
+  ESCROW_HOLD
+  ALLOCATED_READY_TO_SHIP
+  REFUNDED
+}
+
+model CountryPricingProfile {
+  countryCode           String   @id @db.VarChar(2) // 'EG', 'SA', 'AE', 'OM'
+  currency              String   @db.VarChar(3)     // 'EGP', 'SAR', 'AED', 'OMR'
+  decimals              Int      @default(2)        // 2 for EGP/SAR/AED, 3 for OMR
+  fxMode                FxMode   @default(PEGGED)
+  officialFxRate        Decimal  @db.Decimal(12, 4) // Official USD rate
+  overrideFxRate        Decimal? @db.Decimal(12, 4) // Egypt Sagha Dollar rate
+  localMarketPremiumPct Decimal  @default(0) @db.Decimal(6, 4) // e.g., 0.0120 (+1.2%)
+  askSpreadPct          Decimal  @default(0.005) @db.Decimal(6, 4) // Dealer sell margin
+  bidSpreadPct          Decimal  @default(0.005) @db.Decimal(6, 4) // Dealer buyback discount
+  vatBullionPct         Decimal  @default(0) @db.Decimal(5, 4)     // 0% in KSA/UAE/OM for 24K bullion
+  vatJewelryPct         Decimal  @default(0.15) @db.Decimal(5, 4)  // 15% KSA, 5% UAE/OM, Stamp tax EG
+  isActive              Boolean  @default(true)
+  updatedAt             DateTime @updatedAt
+  products              GoldProduct[]
+}
+
+model GoldProduct {
+  id                  String   @id @default(uuid())
+  sku                 String   @unique
+  countryCode         String   @db.VarChar(2)
+  name                String   // e.g., "BTC 10g 24K Ingot", "Gold Pound 8g 21K"
+  karat               Int      // 24, 22, 21, 18
+  weightGrams         Decimal  @db.Decimal(10, 4)
+  makingFeePerGram    Decimal  @db.Decimal(10, 2) // Masna'eya + Damgha per gram
+  cashbackPerGram     Decimal  @default(0) @db.Decimal(10, 2) // Refunded making fee on resale
+  isInvestmentBullion Boolean  @default(true)     // Determines VAT exemption in GCC
+  country             CountryPricingProfile @relation(fields: [countryCode], references: [countryCode])
+}
+
+model LedgerAccount {
+  id          String        @id @default(uuid())
+  code        String        @unique // e.g., "LIABILITY:USER_ESCROW:usr_74:EGP"
+  name        String
+  type        AccountType
+  currency    String        @db.VarChar(6) // 'EGP', 'SAR', 'AED', 'OMR', 'XAU_G'
+  balance     Decimal       @default(0) @db.Decimal(18, 4) // Materialized balance protected by row lock
+  version     Int           @default(1)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+  entries     LedgerEntry[]
+}
+
+model JournalTransaction {
+  id             String        @id @default(uuid())
+  idempotencyKey String        @unique
+  referenceType  String        // 'ORDER_SETTLEMENT', 'ESCROW_DEPOSIT', 'ESCROW_TOPUP', 'ESCROW_REFUND'
+  referenceId    String        // quoteId or orderId
+  description    String
+  postedAt       DateTime      @default(now())
+  entries        LedgerEntry[]
+}
+
+model LedgerEntry {
+  id            String             @id @default(uuid())
+  transactionId String
+  accountId     String
+  direction     EntryDirection
+  amount        Decimal            @db.Decimal(18, 4) // Strictly positive (> 0)
+  runningAfter  Decimal            @db.Decimal(18, 4) // Snapshot of account balance after this leg
+  createdAt     DateTime           @default(now())
+  transaction   JournalTransaction @relation(fields: [transactionId], references: [id])
+  account       LedgerAccount      @relation(fields: [accountId], references: [id])
+
+  @@index([accountId, createdAt])
+}
+
+model PhysicalGoldIngot {
+  id               String      @id @default(uuid())
+  serialNumber     String      @unique // e.g., "BTC-EG-24K-10G-0098412"
+  sku              String      // e.g., "EG-BTC-10G-24K"
+  countryCode      String      @db.VarChar(2)
+  vaultLocation    String      // e.g., "CAIRO_SAGHA_VAULT_1", "RIYADH_OLAYA_VAULT"
+  karat            Int
+  weightGrams      Decimal     @db.Decimal(10, 4)
+  assayCertHash    String      // SHA-256 tamper-proof certificate hash
+  status           IngotStatus @default(AVAILABLE)
+  allocatedOrderId String?
+  allocatedUserId  String?
+  allocatedAt      DateTime?
+  version          Int         @default(1)
+  order            GoldOrder?  @relation(fields: [allocatedOrderId], references: [id])
+
+  @@index([sku, status, countryCode])
+}
+
+model GoldOrder {
+  id                   String               @id @default(uuid())
+  quoteId              String               @unique
+  userId               String
+  countryCode          String               @db.VarChar(2)
+  currency             String               @db.VarChar(3)
+  status               OrderLifecycleStatus
+  lockedGrandTotal     Decimal              @db.Decimal(18, 4)
+  finalSettledTotal    Decimal              @db.Decimal(18, 4)
+  paidAmount           Decimal              @db.Decimal(18, 4)
+  absorbedSlippageCost Decimal              @default(0) @db.Decimal(18, 4)
+  requiredTopUpAmount  Decimal              @default(0) @db.Decimal(18, 4)
+  createdAt            DateTime             @default(now())
+  updatedAt            DateTime             @updatedAt
+  allocatedIngots      PhysicalGoldIngot[]
+}
+
+model GoldVaultPosition {
+  id                    String   @id @default(uuid())
+  userId                String
+  countryCode           String   @db.VarChar(2)
+  currency              String   @db.VarChar(3)
+  totalGrams24k         Decimal  @default(0) @db.Decimal(18, 4) // Mirrors LIABILITY:USER_GOLD_VAULT
+  weightedAvgCostPerG   Decimal  @default(0) @db.Decimal(18, 4) // In local currency (EGP/SAR/AED/OMR)
+  realizedPnl           Decimal  @default(0) @db.Decimal(18, 4)
+  updatedAt             DateTime @updatedAt
+
+  @@unique([userId, countryCode])
+}
