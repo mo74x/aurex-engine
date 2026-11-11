@@ -386,7 +386,7 @@ $$\text{WAC}_{\text{new}} = \frac{(\text{Grams}_{\text{held}} \times \text{WAC}_
 
 Upon sale, realized profit or loss is calculated:
 
-$$\text{Realized P&L} = \text{Net Payout} - (\text{Grams}_{\text{sold}} \times \text{WAC})$$
+$$\text{Realized P\&L} = \text{Net Payout} - (\text{Grams}_{\text{sold}} \times \text{WAC})$$
 
 ---
 
@@ -415,7 +415,7 @@ stateDiagram-v2
     ALLOCATED --> SHIPPED : Vault dispatch to logistics
     MASTER_POOL_BACKING --> AVAILABLE : Unlocked by vault officer upon pool reconciliation
     SHIPPED --> BUYBACK_RETURNED : Customer physical buyback at vault desk
-    BUYBACK_RETURNED --> AVAILABLE : Re-assayed & verified
+    BUYBACK_RETURNED --> AVAILABLE : Re-assayed and verified
 ```
 
 ---
